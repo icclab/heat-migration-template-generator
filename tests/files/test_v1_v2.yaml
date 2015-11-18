@@ -1,0 +1,218 @@
+heat_template_version: 2013-05-23
+description: AutoScaling Wordpress
+parameters:
+  image:
+    type: string
+    description: Image used for servers
+    default: 7469944d-8cd5-40e4-a768-1c4ce0d1fb43
+  key:
+    type: string
+    description: SSH key to connect to the servers
+    default: mer_nb
+  flavor:
+    type: string
+    description: flavor used by the web servers
+    default: m1.small
+  database_flavor:
+    type: string
+    description: flavor used by the db server
+    default: m1.small
+  database_name:
+    type: string
+    description: Name of the wordpress DB
+    default: wordpress
+  database_user:
+    type: string
+    description: Name of the wordpress user
+    default: wordpress
+  external_network_id:
+    type: string
+    description: UUID of a Neutron external network
+    default: 77e659dd-f1b4-430c-ac6f-d92ec0137c85
+resources:
+  shared_database_password:
+    type: OS::Heat::RandomString
+  shared_database_root_password:
+    type: OS::Heat::RandomString
+  shared_db:
+    type: OS::Nova::Server
+    properties:
+      flavor: {get_param: database_flavor}
+      image: {get_param: image}
+      key_name: {get_param: key}
+      networks: [{network: {get_resource: private_net} }]
+      security_groups: [{ get_resource: db_securitygroup}]
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+            yum -y install epel-release
+            yum -y install mariadb mariadb-server
+            touch /var/log/mariadb/mariadb.log
+            chown mysql.mysql /var/log/mariadb/mariadb.log
+            systemctl enable mariadb.service
+            systemctl start mariadb.service
+            mysqladmin -u root password $db_rootpassword
+            cat << EOF | mysql -u root --password=$db_rootpassword
+            CREATE DATABASE $db_name;
+            GRANT ALL PRIVILEGES ON $db_name.* TO "$db_user"@"%"
+            IDENTIFIED BY "$db_password";
+            FLUSH PRIVILEGES;
+            EXIT
+            EOF
+          params:
+            $db_rootpassword: {get_attr: [database_root_password, value]}
+            $db_name: {get_param: database_name}
+            $db_user: {get_param: database_user}
+            $db_password: {get_attr: [database_password, value]}
+  v1_webserver:
+    type: OS::Nova::Server
+    properties:
+      flavor: {get_param: flavor}
+      image: {get_param: image}
+      key_name: {get_param: key}
+      networks: [{port: {get_resource: webserver_port_v1}}]
+#      pool_id: {get_resource: pool}
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+            yum -y install epel-release
+            yum -y install httpd wordpress
+            systemctl enable httpd.service
+            systemctl start httpd.service
+            setsebool -P httpd_can_network_connect_db=1
+            sed -i "/Deny from All/d" /etc/httpd/conf.d/wordpress.conf
+            sed -i "s/Require local/Require all granted/" /etc/httpd/conf.d/wordpress.conf
+            sed -i s/database_name_here/$db_name/ /etc/wordpress/wp-config.php
+            sed -i s/username_here/$db_user/ /etc/wordpress/wp-config.php
+            sed -i s/password_here/$db_password/ /etc/wordpress/wp-config.php
+            sed -i s/localhost/$db_host/ /etc/wordpress/wp-config.php
+            systemctl restart httpd.service
+          params:
+            $db_name: {get_param: database_name}
+            $db_user: {get_param: database_user}
+            $db_password: {get_attr: [database_password, value]}
+            $db_host: {get_attr: [db, first_address]}
+
+  v2_webserver:
+    type: OS::Nova::Server
+    properties:
+      flavor: {get_param: flavor}
+      image: {get_param: image}
+      key_name: {get_param: key}
+      networks: [{port: {get_resource: webserver_port_v2}}]
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+            yum -y install epel-release
+            yum -y install httpd wordpress
+            systemctl enable httpd.service
+            systemctl start httpd.service
+            setsebool -P httpd_can_network_connect_db=1
+            sed -i "/Deny from All/d" /etc/httpd/conf.d/wordpress.conf
+            sed -i "s/Require local/Require all granted/" /etc/httpd/conf.d/wordpress.conf
+            sed -i s/database_name_here/$db_name/ /etc/wordpress/wp-config.php
+            sed -i s/username_here/$db_user/ /etc/wordpress/wp-config.php
+            sed -i s/password_here/$db_password/ /etc/wordpress/wp-config.php
+            sed -i s/localhost/$db_host/ /etc/wordpress/wp-config.php
+            systemctl restart httpd.service
+          params:
+            $db_name: {get_param: database_name}
+            $db_user: {get_param: database_user}
+            $db_password: {get_attr: [database_password, value]}
+            $db_host: {get_attr: [db, first_address]}
+
+  shared_private_net:
+    type: OS::Neutron::Net
+
+  shared_private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: 10.0.0.0/24
+      gateway_ip: 10.0.0.1
+      allocation_pools:
+        - start: 10.0.0.2
+          end: 10.0.0.254
+      dns_nameservers: [8.8.8.8, 8.8.4.4]
+
+  shared_webserver_securitygroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 80
+          port_range_max: 80
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 443
+          port_range_max: 443
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+  shared_db_securitygroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 3306
+          port_range_max: 3306
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+
+  shared_router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: external_network_id }
+
+  shared_router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+
+  v1_webserver_port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups: [{ get_resource: webserver_securitygroup}]
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+
+  v2_webserver_port:
+    type: OS::Neutron::Port
+    properties:
+      security_groups: [{ get_resource: webserver_securitygroup}]
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+
+  service_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network_id }
+      port_id: { get_resource: webserver_port_v1 }
+
+outputs:
+  website_url:
+    value:
+      str_replace:
+        template: http://host/wordpress/
+        params:
+          host: { get_attr: [service_floating_ip, floating_ip_address] }
+    description: >
+      This URL is the "external" URL that can be used to access the
+      Wordpress site.
